@@ -4,6 +4,9 @@ import {el,button,link,external,field,form,modal,closeModal,confirmAction,toast,
 const content = document.getElementById('content');
 let me = null, revision = 0, blobURLs = [];
 const admin = () => me?.role === 'admin';
+const canEditReference = () => me?.role === 'admin' || me?.role === 'staff';
+// Разделы, скрытые из меню сотрудника до доработки: доступ по прямой ссылке остаётся.
+const staffHiddenPages = ['inventory','reference'];
 const roles = {admin:'Администратор',staff:'Сотрудник',teacher:'Преподаватель',student:'Студент'};
 const types = {equipment:'Оборудование',inventory:'Мебель и инвентарь',raw_material:'Химикаты и материалы',other:'Посуда и другое'};
 const keyStatuses = {available:'Свободен',issued:'Выдан',lost:'Утерян'};
@@ -34,8 +37,10 @@ function shell(page) {
   rail.firstChild.append(el('span',{class:'brand-mark','aria-hidden':'true'},'▣'),el('strong',{},'Контур кафедры'),el('small',{},'Лабораторный журнал'));
   const nav = el('nav',{class:'nav','aria-label':'Разделы'});
   for (const [group,items] of groups) {
+    const visible = items.filter(([key]) => admin() || !staffHiddenPages.includes(key));
+    if (!visible.length) continue;
     if (group) nav.append(el('p',{class:'nav-label'},group));
-    for (const [key,title,icon] of items) nav.append(el('a',{href:`#/${key}`,'aria-current':page===key?'page':null,onclick:()=>rail.classList.remove('open')},el('span',{class:'nav-icon','aria-hidden':'true'},icon),title));
+    for (const [key,title,icon] of visible) nav.append(el('a',{href:`#/${key}`,'aria-current':page===key?'page':null,onclick:()=>rail.classList.remove('open')},el('span',{class:'nav-icon','aria-hidden':'true'},icon),title));
   }
   rail.append(nav,el('div',{class:'rail-bottom'},el('strong',{},me ? roles[me.role] || me.role : 'Гостевой доступ'),me ? 'Личное рабочее пространство' : 'Внутренние реестры доступны после входа'));
   const user = me ? actions(el('span',{class:'avatar','aria-hidden':'true'},initials(me.full_name)),link(me.full_name,'#/profile'),el('small',{},roles[me.role]),button('Выйти', async()=>{await api.logout(); me=null; navTo('welcome');})) : actions(link('Войти','#/login','btn'),link('Создать аккаунт','#/register','btn primary'));
@@ -172,17 +177,40 @@ async function keyList(q) {
   const filtered=data.filter(k=>`${k.key_number} ${k.room_description}`.toLowerCase().includes(search));
   return el('div',{},head('Ключи','Выдача, возврат и история. Карточки ключей создаёт и удаляет только администратор.',admin()?button('Добавить ключ',()=>keyForm(),'primary'):null),sheet(filterBar('keys',q,[input('search','Поиск',q.get('search')||'',{placeholder:'Номер или помещение'}),select('status','Состояние',q.get('status')||'',[['','Все состояния'],...choose(keyStatuses)])]),table(['Номер ключа','Помещение','Статус',''],filtered.map(k=>[link(k.key_number,`#/keys/${k.id}`,'record-link'),k.room_description,status(keyStatuses[k.status]||k.status,k.status==='available'?'good':'warn'),link('Открыть журнал',`#/keys/${k.id}`)])),el('div',{class:'sheet-foot'},`${filtered.length} ключей в выборке`)));
 }
+const peopleCache = new Map();
+async function personName(id) {
+  if (!id) return '—';
+  if (!peopleCache.has(id)) { try { peopleCache.set(id, (await api.getUser(id)).full_name || '—'); } catch { peopleCache.set(id, '—'); } }
+  return peopleCache.get(id);
+}
+function holderLabel(holder) {
+  if (!holder) return '—';
+  if (holder.guest_name) return holder.guest_phone ? `${holder.guest_name} · ${holder.guest_phone}` : holder.guest_name;
+  return null; // сотрудник: имя подтягиваем запросом
+}
+
 async function keyDetail(id) {
   const [x,history]=await Promise.all([api.getKey(id),api.getKeyHistory(id)]);
   const holder=x.status==='issued'?await api.getKeyHolder(id):null;
   const holderID=holder?.user_id;
-  let holderName='—';if(holderID){try{holderName=(await api.getUser(holderID)).full_name;}catch{holderName='Получатель недоступен';}}
+  const holderName=holder?(holderLabel(holder)||await personName(holderID)):'—';
   const operations=actions();
   if(x.status==='available')operations.append(button(admin()?'Выдать ключ':'Взять ключ',()=>issueKey(x),'primary'));
   if(x.status==='issued'&&(admin()||holderID===me.id))operations.append(button('Вернуть ключ',()=>modal(`Возврат ключа ${x.key_number}`,form([input('comment','Комментарий','',{type:'textarea'})],'Подтвердить возврат',async data=>{await api.returnKey(id,data);closeModal();route();})), 'primary'));
-  if(admin())operations.append(button('Редактировать',()=>keyForm(x)),button('QR для гостей',async()=>{const data=await request(`/keys/${id}/public-link`,'POST',{});const url=new URL(data.path,location.origin).href;modal(`QR ключа ${x.key_number}`,el('div',{},await blobImage(`/api/v1/keys/${id}/qr`,'QR для запроса ключа','qr'),el('p',{class:'break'},link(url,url)),el('p',{},'Гость откроет форму запроса. Выдачу подтверждает администратор.'),button('Распечатать',()=>window.print())));}));
-  return el('div',{},link('← К реестру ключей','#/keys','back-link'),head(`Ключ ${x.key_number}`,x.room_description),sheet(sh('Карточка ключа'),body(details([['Состояние',status(keyStatuses[x.status],x.status==='available'?'good':'warn')],['Сейчас у',holderName],['Примечания',x.notes||'—']])),body(operations)),sheet(sh('Журнал операций','Все выдачи и возвраты'),table(['Действие','Дата','Комментарий'],(history||[]).map(h=>[{issue:'Выдан',return:'Возвращён',lost:'Утрачен',restore:'Утеря отменена'}[h.action_type]||h.action_type,date(h.timestamp,true),h.comment]))),admin()?actions((x.status==='lost'?button('Отменить утерю',()=>confirmAction('Отменить утерю',`Ключ ${x.key_number} вернётся в реестр как доступный.`,async()=>{await api.restoreKey(id,{comment:'Утеря отменена администратором'});route();})):button('Отметить утерю',()=>confirmAction('Отметить утерю',`Ключ ${x.key_number} будет отмечен как утерянный.`,async()=>{await api.markLost(id,{comment:'Утеря отмечена администратором'});route();}),'danger')),button('Удалить ключ',()=>remove('Удалить ключ',x.key_number,()=>request(`/keys/${id}`,'DELETE')),'danger')):null);
+  if(admin())operations.append(button('Редактировать',()=>keyForm(x)),button('QR-код ключа',()=>keyQR(x)),button('Перевыпустить QR',()=>confirmAction('Перевыпустить QR-код',`Старая наклейка на ключе ${x.key_number} перестанет работать — распечатайте новую.`,async()=>{await request(`/keys/${id}/public-link`,'POST',{renew:true});toast('QR-код перевыпущен');})));
+  const journal=await Promise.all((history||[]).map(async h=>[{issue:'Выдан',return:'Возвращён',lost:'Утрачен',restore:'Утеря отменена'}[h.action_type]||h.action_type,holderLabel(h)||await personName(h.user_id),date(h.timestamp,true),h.comment]));
+  return el('div',{},link('← К реестру ключей','#/keys','back-link'),head(`Ключ ${x.key_number}`,x.room_description),sheet(sh('Карточка ключа'),body(details([['Состояние',status(keyStatuses[x.status],x.status==='available'?'good':'warn')],['Сейчас у',holderName],['Примечания',x.notes||'—']])),body(operations)),sheet(sh('Журнал операций','Все выдачи и возвраты'),table(['Действие','Кто','Дата','Комментарий'],journal)),admin()?actions((x.status==='lost'?button('Отменить утерю',()=>confirmAction('Отменить утерю',`Ключ ${x.key_number} вернётся в реестр как доступный.`,async()=>{await api.restoreKey(id,{comment:'Утеря отменена администратором'});route();})):button('Отметить утерю',()=>confirmAction('Отметить утерю',`Ключ ${x.key_number} будет отмечен как утерянный.`,async()=>{await api.markLost(id,{comment:'Утеря отмечена администратором'});route();}),'danger')),button('Удалить ключ',()=>remove('Удалить ключ',x.key_number,()=>request(`/keys/${id}`,'DELETE')),'danger')):null);
 }
+async function keyQR(x) {
+  const data=await request(`/keys/${x.id}/public-link`,'POST',{});
+  const url=new URL(data.path,location.origin).href;
+  modal(`QR-код ключа ${x.key_number}`,el('div',{},
+    await blobImage(`/api/v1/keys/${x.id}/qr`,'QR-код ключа','qr'),
+    el('p',{class:'break'},link(url,url)),
+    el('p',{class:'privacy'},'Распечатайте и наклейте на бирку ключа. Кто отсканирует QR — тот берёт ключ, повторный скан того же человека сдаёт его.'),
+    el('div',{class:'form-actions'},button('Распечатать',()=>window.print(),'primary'))));
+}
+
 function keyForm(x) {
   modal(x?'Редактировать ключ':'Новый ключ',form([input('key_number','Номер ключа',x?.key_number,{required:true}),input('room_description','Помещение',x?.room_description,{required:true}),input('notes','Примечания',x?.notes,{type:'textarea'})],'Сохранить',async data=>{if(x)await api.updateKey(x.id,nullable(data));else await api.createKey(nullable(data));closeModal();route();}));
 }
@@ -231,14 +259,31 @@ async function users(q) {
   return el('div',{},head('Коллеги и доступ','Аккаунты кафедры. Только администраторы назначают роли и управляют доступом.',button('Создать аккаунт',()=>userForm(),'primary')),sheet(filterBar('users',q,[input('search','Имя или почта',q.get('search')||'',{placeholder:'Найти коллегу…'}),select('role','Роль',q.get('role')||'',[['','Все роли'],...choose(roles)])]),table(['Коллега','Роль','Кабинет','Доступ'],filtered.map(u=>[el('div',{},link(u.full_name,`#/users/${u.id}`,'record-link'),el('small',{},u.email)),roles[u.role]||u.role,u.office,status(u.is_active?'Активен':'Отключён',u.is_active?'good':'warn')])),el('div',{class:'sheet-foot'},`${filtered.length} аккаунтов`)));
 }
 async function profile(u) {
-  const own=u.id===me.id;
-  const root=el('div',{},head(own?'Мой профиль':u.full_name,`${roles[u.role]||u.role}${u.position?' · '+u.position:''}`,admin()?button('Редактировать профиль',()=>userForm(u),'primary'):null),sheet(sh(u.full_name,own?'Личная рабочая область':'Профиль сотрудника'),body(details([['Почта',u.email],['Кабинет',u.office],['Телефон',u.phone],['Дата рождения',date(u.date_of_birth)],['Роль',roles[u.role]],['Доступ',status(u.is_active?'Активен':'Отключён',u.is_active?'good':'warn')]])),body(actions(link('Публикации',`#/articles?author_id=${encodeURIComponent(u.id)}`,'btn'),own?link('Мои заметки','#/notes','btn'):null))));
+  const own=u.id===me.id,mayEdit=own||admin();
+  const root=el('div',{},head(own?'Мой профиль':u.full_name,`${roles[u.role]||u.role}${u.position?' · '+u.position:''}`,mayEdit?button('Редактировать профиль',()=>userForm(u),'primary'):null),sheet(sh(u.full_name,own?'Личная рабочая область':'Профиль сотрудника'),body(details([['Почта',u.email],['Кабинет',u.office],['Телефон',u.phone],['Дата рождения',date(u.date_of_birth)],['Роль',roles[u.role]],['Доступ',status(u.is_active?'Активен':'Отключён',u.is_active?'good':'warn')]])),body(actions(link('Публикации',`#/articles?author_id=${encodeURIComponent(u.id)}`,'btn'),own?link('Мои заметки','#/notes','btn'):null))));
   if(u.avatar)root.append(sheet(sh('Фото профиля'),body(await blobImage(api.avatarUrl(u.id),u.full_name))));
-  if(admin())root.append(sheet(sh('Фото профиля'),body(upload('Загрузить аватар',file=>api.uploadUserAvatar(u.id,file)),button('Удалить аватар',()=>remove('Удалить аватар',u.full_name,()=>api.deleteUserAvatar(u.id)),'quiet'))),button(u.is_active?'Отключить доступ':'Включить доступ',()=>confirmAction(u.is_active?'Отключить доступ':'Включить доступ',`Профиль: ${u.full_name}. История операций сохранится.`,async()=>{if(u.is_active)await api.deactivateUser(u.id);else await api.activateUser(u.id);route();}),'danger'));
+  if(mayEdit)root.append(sheet(sh('Фото профиля'),body(upload('Загрузить аватар',file=>api.uploadUserAvatar(u.id,file)),u.avatar?button('Удалить аватар',()=>remove('Удалить аватар',u.full_name,()=>api.deleteUserAvatar(u.id)),'quiet'):null)));
+  if(admin())root.append(button(u.is_active?'Отключить доступ':'Включить доступ',()=>confirmAction(u.is_active?'Отключить доступ':'Включить доступ',`Профиль: ${u.full_name}. История операций сохранится.`,async()=>{if(u.is_active)await api.deactivateUser(u.id);else await api.activateUser(u.id);route();}),'danger'));
   const history=await api.getUserHistory(u.id);root.append(sheet(sh('История ключей'),table(['Ключ','Операция','Дата','Комментарий'],(history||[]).map(h=>[link(`Ключ ${h.key_id}`,`#/keys/${h.key_id}`),{issue:'Выдача',return:'Возврат',lost:'Утеря',restore:'Отмена утери'}[h.action_type]||h.action_type,date(h.timestamp,true),h.comment]))));return root;
 }
 function userForm(u) {
-  modal(u?'Профиль и права':'Новый аккаунт',form([input('full_name','Имя и фамилия',u?.full_name,{required:true,minlength:3}),input('email','Почта',u?.email,{type:'email',required:true}),...(!u?[input('password','Начальный пароль','',{type:'password',required:true,minlength:8,autocomplete:'new-password'})]:[]),select('role','Роль',u?.role||'staff',choose(roles)),el('p',{class:'form-hint'},'Администратор имеет полный доступ, включая назначение других администраторов.'),input('position','Должность',u?.position),el('div',{class:'form-grid'},input('office','Кабинет',u?.office),input('phone','Телефон',u?.phone,{type:'tel'})),input('date_of_birth','Дата рождения',u?.date_of_birth?.slice(0,10),{type:'date'})],'Сохранить',async data=>{if(u)await api.updateUser(u.id,{...nullable(data),is_active:u.is_active});else await api.createUser(nullable(data));if(u?.id===me.id)me=await api.getMe();closeModal();route();}));
+  const self=!!u&&u.id===me.id,manage=admin();
+  const fields=[
+    input('full_name','Имя и фамилия',u?.full_name,{required:true,minlength:3}),
+    ...(manage?[input('email','Почта',u?.email,{type:'email',required:true})]:[]),
+    ...(!u?[input('password','Начальный пароль','',{type:'password',required:true,minlength:8,autocomplete:'new-password'})]:[]),
+    ...(manage?[select('role','Роль',u?.role||'staff',choose(roles)),el('p',{class:'form-hint'},'Администратор имеет полный доступ, включая назначение других администраторов.')]:[el('p',{class:'form-hint'},'Почту, роль и доступ меняет администратор.')]),
+    input('position','Должность',u?.position),
+    el('div',{class:'form-grid'},input('office','Кабинет',u?.office),input('phone','Телефон',u?.phone,{type:'tel'})),
+    input('date_of_birth','Дата рождения',u?.date_of_birth?.slice(0,10),{type:'date'})
+  ];
+  modal(u?(self?'Мой профиль':'Профиль и права'):'Новый аккаунт',form(fields,'Сохранить',async data=>{
+    if(u){
+      const payload={...nullable(data),is_active:u.is_active};
+      if(!manage){payload.role=u.role;payload.email=u.email;}
+      await api.updateUser(u.id,payload);
+    }else await api.createUser(nullable(data));
+    if(u?.id===me.id)me=await api.getMe();closeModal();route();}));
 }
 async function notes(id) {
   const list=await request('/notes'),selected=id?list.find(n=>String(n.id)===String(id)):null;
@@ -249,16 +294,78 @@ async function notes(id) {
 async function reference(q) {
   const list=await request('/reference'),search=(q.get('search')||'').toLowerCase();
   const filtered=list.filter(x=>`${x.category} ${x.name} ${x.value} ${x.notes}`.toLowerCase().includes(search));
-  return el('div',{},head('Справочник','Полезные сведения кафедры. Актуальные записи поддерживают администраторы.',admin()?button('Добавить запись',()=>referenceForm(),'primary'):null),sheet(filterBar('reference',q,[input('search','Поиск по справочнику',q.get('search')||'',{placeholder:'Тема, название или значение…'})]),table(['Раздел','Название','Сведения','Примечание',...(admin()?['']:[])],filtered.map(x=>[x.category,x.name,external(x.value,x.value),x.notes,...(admin()?[actions(button('Изменить',()=>referenceForm(x),'quiet'),button('Удалить',()=>remove('Удалить запись',x.name,()=>request(`/reference/${x.id}`,'DELETE')),'quiet'))]:[])]),'Администратор может добавить контакты служб, инструкции и полезные ссылки.')));
+  return el('div',{},head('Справочник','Полезные сведения кафедры. Записи ведут сотрудники и администраторы.',canEditReference()?button('Добавить запись',()=>referenceForm(),'primary'):null),sheet(filterBar('reference',q,[input('search','Поиск по справочнику',q.get('search')||'',{placeholder:'Тема, название или значение…'})]),table(['Раздел','Название','Сведения','Примечание',...(canEditReference()?['']:[])],filtered.map(x=>[x.category,x.name,external(x.value,x.value),x.notes,...(canEditReference()?[actions(button('Изменить',()=>referenceForm(x),'quiet'),button('Удалить',()=>remove('Удалить запись',x.name,()=>request(`/reference/${x.id}`,'DELETE')),'quiet'))]:[])]),'Сотрудник может добавить контакты служб, инструкции и полезные ссылки.')));
 }
 function referenceForm(x) {modal(x?'Редактировать запись':'Новая запись справочника',form([input('category','Раздел',x?.category,{required:true}),input('name','Название',x?.name,{required:true}),input('value','Сведения или ссылка',x?.value,{required:true,type:'textarea'}),input('notes','Примечание',x?.notes,{type:'textarea'})],'Сохранить',async data=>{await request(x?`/reference/${x.id}`:'/reference',x?'PUT':'POST',data);closeModal();route();}));}
 function assistants() {
   return el('div',{},head('Ассистенты','Инструменты научной работы и обучения.'),sheet(sh('Исследовательские инструменты','Раздел готов для подключения сервисов'),el('div',{class:'tool-row'},el('div',{},el('h3',{},'Поиск научных статей'),el('p',{},'Подбор публикаций по теме исследования с источниками и ссылками.')),status('Планируется')),el('div',{class:'tool-row'},el('div',{},el('h3',{},'Еженедельная сводка'),el('p',{},'Новые работы по вашим темам в кратком обзоре. Рассылка пока не подключена.')),status('Планируется')),el('div',{class:'tool-row'},el('div',{},el('h3',{},'Совместная рукопись'),el('p',{},'Редактор статей с комментариями и одновременной работой соавторов. Это следующий этап развития.')),status('Планируется'))),sheet(sh('Уже можно использовать'),body(actions(link('Вести личные заметки','#/notes','btn primary'),link('Работать с публикациями','#/articles','btn')))));
 }
+const guestCard = 'key_guest_card';
+function guestMemory() { try { return JSON.parse(localStorage.getItem(guestCard)) || {}; } catch { return {}; } }
+function rememberGuest(name, phone) { try { localStorage.setItem(guestCard, JSON.stringify({name, phone})); } catch {} }
+
+// Экран ключа, открытого по QR: одно крупное действие — взять, сдать или принять.
 async function publicKey(id) {
-  const x=await request(`/public/keys/${encodeURIComponent(id)}`);
-  return el('div',{},head(`Ключ ${x.key_number}`,x.room_description||'Запрос ключа кафедры'),sheet(sh('Запросить ключ'),body(status(keyStatuses[x.status]||x.status,x.status==='available'?'good':'warn'),el('p',{class:'privacy'},'Укажите, кто вы и зачем нужен ключ. Эти сведения увидит администратор. Заявка не означает, что ключ уже выдан.'),form([input('name','Ваше имя','',{required:true,minlength:3,maxlength:200}),input('affiliation','Откуда вы: кафедра, группа или организация','',{required:true,maxlength:300}),input('purpose','Для чего нужен ключ','',{required:true,type:'textarea',maxlength:2000})],'Отправить заявку',async(data,node)=>{await request(`/public/keys/${encodeURIComponent(id)}/requests`,'POST',data);node.replaceChildren(el('h3',{},'Заявка отправлена'),el('p',{role:'status'},'Обратитесь к администратору для подтверждения и получения ключа.'));}))));
+  const data = await request(`/public/keys/${encodeURIComponent(id)}`);
+  const place = el('div', {});
+  const draw = (state, result) => place.replaceChildren(scanView(id, state, draw, result));
+  draw(data);
+  return el('div', {}, head(`Ключ ${data.key_number}`, data.room_description || 'Ключ кафедры'),
+    sheet(sh('Ключ по QR', 'Сканирование берёт ключ, повторное — сдаёт'), body(place)));
 }
+
+function scanView(id, state, draw, result) {
+  const load = async () => { try { draw(await request(`/public/keys/${encodeURIComponent(id)}`)); } catch (error) { toast(error.message); } };
+  const scan = async payload => {
+    try {
+      const done = await request(`/public/keys/${encodeURIComponent(id)}/scan`, 'POST', payload || {});
+      if (payload?.name) rememberGuest(payload.name, payload.phone);
+      draw(await request(`/public/keys/${encodeURIComponent(id)}`), done);
+    } catch (error) { draw(state, {error:error.message}); }
+  };
+  const seen = guestMemory();
+  const guestForm = label => form([
+    input('name', 'Ваше имя', seen.name || '', {required:true, minlength:3, maxlength:200, autocomplete:'name'}),
+    input('phone', 'Телефон', seen.phone || '', {type:'tel', required:true, minlength:5, maxlength:40, autocomplete:'tel'}),
+    el('p', {class:'form-hint'}, 'Данные сохранит кафедра: по ним видно, у кого ключ. В следующий раз подставятся сами.')
+  ], label, data => scan({...data, intent:'take'}));
+  const title = el('p', {class:'scan-result'}, `Ключ ${state.key_number}`);
+  const hint = state.room_description ? `${state.room_description}. ` : '';
+
+  if (result?.error) {
+    return el('div', {class:'scan-panel'}, el('p', {class:'scan-kicker'}, 'Не получилось'),
+      el('p', {class:'scan-note', role:'alert'}, result.error),
+      el('div', {class:'scan-actions'}, button('Продолжить', load, 'primary')));
+  }
+  if (result) {
+    return el('div', {class:'scan-panel'}, el('p', {class:'scan-kicker'}, 'Готово'), title,
+      el('p', {class:'scan-note'}, result.action === 'return'
+        ? 'Спасибо — ключ снова свободен.'
+        : result.transferred ? 'Ключ переоформился на вас, прежний держатель снят автоматически.'
+        : 'Записан за вами. Чтобы сдать, отсканируйте QR ещё раз.'),
+      el('div', {class:'scan-actions'}, button('Понятно', load, 'primary')));
+  }
+  if (state.status === 'lost') {
+    return el('div', {class:'scan-panel'}, el('p', {class:'scan-kicker'}, 'Ключ'), title,
+      status('Утерян', 'bad'),
+      el('p', {class:'scan-note'}, 'Ключ помечен утерянным: выдача по QR закрыта. Обратитесь к администратору кафедры.'));
+  }
+  if (state.held_by_you) {
+    return el('div', {class:'scan-panel'}, el('p', {class:'scan-kicker'}, 'Ключ сейчас у вас'), title,
+      el('p', {class:'scan-note'}, `${hint}взят ${state.held_since ? date(state.held_since, true) : 'ранее'}.`),
+      el('div', {class:'scan-actions'}, button('Сдать ключ', () => scan({intent:'return'}), 'primary')));
+  }
+  if (state.status === 'issued') {
+    return el('div', {class:'scan-panel'}, el('p', {class:'scan-kicker'}, 'Ключ занят'), title,
+      el('p', {class:'scan-note'}, 'Ключ у другого сотрудника. Если берёте его себе — он переоформится на вас, запись прежнего держателя закроется.'),
+      el('div', {class:'scan-actions'}, me ? button('Забрать ключ', () => scan({intent:'take'}), 'primary') : guestForm('Забрать ключ')));
+  }
+  return el('div', {class:'scan-panel'}, el('p', {class:'scan-kicker'}, 'Ключ свободен'), title,
+    el('p', {class:'scan-note'}, `${hint}${me ? 'Ключ запишется за вами.' : 'Назовите себя — ключ запишется за вами.'} Чтобы сдать, отсканируйте QR ещё раз.`),
+    el('div', {class:'scan-actions'}, me ? button('Взять ключ', () => scan({intent:'take'}), 'primary') : guestForm('Взять ключ')),
+    me ? null : el('p', {class:'privacy'}, 'Сотрудник кафедры может ', link('войти', '#/login'), ' — тогда ключ запишется на аккаунт.'));
+}
+
 async function requestsPage() {
   const list=await request('/key-requests');
   return el('div',{},head('Заявки на ключи','Гостевые запросы. Перед выдачей проверьте сведения и назначьте ответственного сотрудника.'),sheet(table(['Гость','Откуда','Цель','Ключ','Статус','Действия'],list.map(x=>[x.name,x.affiliation,x.purpose,x.key_number||x.key_id,status({pending:'Ожидает решения',approved:'Подтверждена',rejected:'Отклонена'}[x.status]||x.status,x.status==='pending'?'warn':''),x.status==='pending'?actions(button('Подтвердить',()=>approveRequest(x),'primary'),button('Отклонить',()=>confirmAction('Отклонить заявку',`Заявитель: ${x.name}`,async()=>{await request(`/key-requests/${x.id}/reject`,'POST',{});route();}),'quiet')):'—']))));
