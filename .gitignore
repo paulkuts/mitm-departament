@@ -1,0 +1,65 @@
+# --- Артефакты сборки ---
+dist/
+build/
+target/
+out/
+bin/
+vendor/
+node_modules/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.test
+*.prof
+coverage.out
+
+# --- Рантайм-данные: реальные базы, фото, экспорт не коммитим ---
+data/
+export/
+*.db
+*.db-wal
+*.db-shm
+
+# --- Секреты и локальные конфиги ---
+.env
+.env.*
+!.env.example
+configs/local.yaml
+configs/production.yaml
+
+# --- Python / IDE / OS ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# --- Локальный рантайм и синтетические демо-данные ---
+.local/
+*.log
+logs/
+*.tmp
+*.temp
+*.zip
+*.tar
+*.tar.gz
+*.gz
+
+# --- Служебные документы проекта: в публичный репозиторий не попадают ---
+AGENT.md
+AGENTS.md
+CLAUDE.md
+HANDOFF.md
+PROJECT_STATE.md
+PRODUCT.md
+SOURCE_MANIFEST.json
+DESIGN.md
+DESIGN_IMPLEMENTATION.md
+.impeccable/
+docs/handoff/

@@ -1,0 +1,3 @@
+Create the working configuration here (for example production.yaml),
+based on the template deploy/configs/default.yaml.
+No real configs or secrets are included in the repository.
